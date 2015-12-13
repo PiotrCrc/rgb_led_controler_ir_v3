@@ -6,9 +6,11 @@
 #include "Arduino.h"
 #include "Ramp.h"
 
-#define DEBUG 1
+#define DEBUG 0
         //#if DEBUG
         //#endif
+
+#define DHT22 0
         
 #define BAND RF12_868MHZ 
 #define GROUP 5     
@@ -22,6 +24,23 @@ OneWire ds(ONE_WIRE_BUS);
 DallasTemperature sensors(&ds);
 long tempTimer;
 
+#if DHT22
+  #include "DHT.h"
+  #define DHTPIN A5
+  #define DHTTYPE DHT22
+  DHT dht(DHTPIN, DHTTYPE);
+  long dht_delay;
+  long dht_delay250;
+  long dht_delay20;
+  byte dht_do_meas = 0;
+  float dht_h, dht_t;
+  int dht_h_avg, dht_t_avg;
+  int dht_h_a[10];
+  int dht_t_a[10];
+  byte dht_i=0;
+
+#endif
+
 // RF radio variables
 byte rf_cmd;
 byte rf_msg_id;
@@ -34,6 +53,8 @@ long sendTimer;
 long recvTimer;
 
 long rampTimer;
+
+byte uptime = 0;
 
 Ramp ch_rgb(true);
 Ramp ch_w(true);
@@ -72,10 +93,62 @@ void setup () {
     
     timeout(&sendTimer,0);
     timeout(&recvTimer,0);
-    
+
+    #if DHT22
+    timeout(&dht_delay,0);
+    #endif
 }
 
 void loop() {
+
+#if DHT22
+  switch (dht_do_meas) {
+    case 0:
+      if (timeout(&dht_delay,30000)){
+        uptime++;
+        timeout(&dht_delay250,0);
+        pinMode(DHTPIN, OUTPUT);
+        digitalWrite(DHTPIN, HIGH);
+        dht_do_meas=1;
+      }
+      break;
+    case 1: {
+      if (timeout(&dht_delay250,250)){
+        digitalWrite(DHTPIN, LOW);
+        timeout(&dht_delay20,0);
+        dht_do_meas=2;
+      }   
+      break;     
+    }
+    case 2: {
+      if (timeout(&dht_delay20,20)){
+        dht.read_nd();
+        if (!isnan(dht.readHumidity_nd())) {
+        dht_h = dht.readHumidity_nd();
+        dht_t = dht.readTemperature_nd();
+        if (dht_i>9) 
+          {
+            dht_i=0;
+            dht_t_avg = 0;
+            dht_h_avg = 0;
+            for (byte i = 0; i < 10; ++i) {
+              dht_t_avg = dht_t_avg + dht_t_a[i];
+              dht_h_avg = dht_h_avg + dht_h_a[i];
+            }
+            dht_t_avg = dht_t_avg / 10;
+            dht_h_avg = dht_h_avg / 10;
+          }
+        dht_h_a[dht_i]=(int) (dht_h*100);
+        dht_t_a[dht_i]=(int) (dht_t*100);
+        dht_i++;
+        }
+        dht_do_meas=0;
+      }
+      break;
+    }
+  }
+#endif
+  
 //  handling changing of the colors (ramp)
     if (timeout(&rampTimer,12)) {
       ch_rgb.do_step();
@@ -93,7 +166,11 @@ void loop() {
     
  
 //  handling radio packets - receive   
-    if ( rf12_recvDone() && timeout(&recvTimer,50) ) 
+    if ( rf12_recvDone() && timeout(&recvTimer,50) 
+    #if DHT22 
+    && (dht_do_meas == 0) 
+    #endif 
+    ) 
     {           
       if (rf12_hdr == ( RF12_HDR_DST | NODEID) && rf12_crc == 0 && rf12_len == NVALUES) 
       {
@@ -132,8 +209,8 @@ void loop() {
            saveSettings();             
            break;  
          case 6:
-           eeprom[5] = ch_w.get_sp(0);
-           eeprom[6] = ch_w.get_steps();
+           eeprom[5] = rf_color[0];
+           eeprom[6] = rf_color[3];
            saveSettings();             
            break;  
          case 96:
@@ -157,8 +234,25 @@ if (timeout(&tempTimer,5000)) {sensors.requestTemperatures();}
         rf_packet[5] = rf_msg_id;
         if (rf_cmd == 9) {
           rf_packet[1] = sensors.getTempCByIndex(0);
-          rf_packet[2] = round(sensors.getTempCByIndex(0)*100)-round(sensors.getTempCByIndex(0))*100;
-        } else if (rf_cmd == 97) {
+          rf_packet[2] = floor(sensors.getTempCByIndex(0)*100)-floor(sensors.getTempCByIndex(0))*100;
+        } 
+        #if DHT22
+        else if (rf_cmd == 10) {
+          rf_packet[1] = (byte) dht_h;
+          rf_packet[2] = (byte) (floor(dht_h*100)-floor(dht_h)*100);
+          rf_packet[3] = (byte) dht_t;
+          rf_packet[4] = (byte) (floor(dht_t*100)-floor(dht_t)*100);
+        } else if (rf_cmd == 11) {
+          rf_packet[1] = (byte) floor(dht_h_avg / 100);
+          rf_packet[2] = (byte) (floor(dht_h_avg / 100)*100-dht_h_avg);
+          rf_packet[3] = (byte) floor(dht_t_avg / 100);
+          rf_packet[4] = (byte) (floor(dht_t_avg / 100)*100-dht_t_avg);
+        } 
+        #endif
+        else if (rf_cmd == 20) {
+          rf_packet[1] = (int) uptime;
+        } 
+          else if (rf_cmd == 97) {
           rf_packet[1] = eeprom[9];
         } else if (rf_cmd == 99) {
           rf_packet[1] = eeprom[8];
